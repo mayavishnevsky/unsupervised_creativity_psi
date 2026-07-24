@@ -78,6 +78,8 @@ pip install -r requirements.txt
 
 - `--save_reward` : Display the reward value on the saved images.
 - `--save_tweedies` : Save the step-wise particle tweedies for each MCMC and SMC process.
+- `--save_baseline_comparison` : Save a vanilla FLUX image as `<index>_baseline.png` from the same raw noise used to initialize Ψ-Sampler. Disabled by default.
+- `--baseline_num_inference_steps 4` : Number of vanilla FLUX denoising steps used for the optional baseline image.
 
 </details>
 

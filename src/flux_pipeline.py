@@ -177,7 +177,14 @@ class StochasticFluxPipeline():
         
         return phrases_indices
 
-    def prepare_latents(self, height, width, reward_model=None, generator=None):
+    def prepare_latents(
+        self,
+        height,
+        width,
+        reward_model=None,
+        generator=None,
+        return_initial_latents=False,
+    ):
         self.height = height
         self.width = width
         self.latent_h, self.latent_w = int(height) // (self.pipe.vae_scale_factor * 2), int(width) // (self.pipe.vae_scale_factor * 2)
@@ -198,11 +205,39 @@ class StochasticFluxPipeline():
             generator = generator)
         self.latent_image_ids = latent_image_ids
 
+        initial_latents = latents.detach().clone() if return_initial_latents else None
+
         if self.init_sampling_method is not None:
             assert reward_model is not None, "grad_log_prob must be provided when using MCMC"
             latents = self.init_sampling_method(latents, reward_model=reward_model, pipe=self)
 
+        if return_initial_latents:
+            return latents, initial_latents
         return latents
+
+    @torch.inference_mode()
+    def generate_baseline(self, initial_latents, num_inference_steps=4):
+        """Generate vanilla FLUX output from the first pre-MCMC noise latent."""
+        if initial_latents.shape[0] < 1:
+            raise ValueError("initial_latents must contain at least one sample")
+        if num_inference_steps < 1:
+            raise ValueError("num_inference_steps must be positive")
+
+        output = self.pipe(
+            prompt_embeds=self.prompt_embeds,
+            pooled_prompt_embeds=self.pooled_peompt_embeds,
+            negative_prompt_embeds=self.negative_prompt_embeds if self.do_true_cfg else None,
+            negative_pooled_prompt_embeds=self.negative_pooled_prompt_embeds if self.do_true_cfg else None,
+            true_cfg_scale=self.cfg.true_cfg_scale,
+            guidance_scale=self.cfg.guidance_scale,
+            height=self.height,
+            width=self.width,
+            num_inference_steps=num_inference_steps,
+            num_images_per_prompt=1,
+            latents=initial_latents[:1].detach().clone(),
+            output_type="pil",
+        )
+        return output.images[0]
     
     def predict(self, latents, t):
         vel_pred = list()

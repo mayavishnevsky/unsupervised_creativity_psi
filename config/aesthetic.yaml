@@ -6,6 +6,8 @@ tag: ${prompt}
 seed: 0
 height: 512
 width: 512
+save_baseline_comparison: false
+baseline_num_inference_steps: 4
 
 prompt: ""
 negative_prompt: null

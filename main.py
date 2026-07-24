@@ -19,6 +19,8 @@ class Config:
     negative_prompt: str = None
     height: int = 512
     width: int = 512
+    save_baseline_comparison: bool = False
+    baseline_num_inference_steps: int = 4
 
 def main(main_cfg, CFG, args, task_name):
     device = torch.device("cuda:0")
@@ -45,14 +47,25 @@ def main(main_cfg, CFG, args, task_name):
         reward_model.register_data(data)
         pipe.unload_encoder()
 
-        seed_everything(main_cfg.seed)
-        generator = torch.Generator(device=device).manual_seed(main_cfg.seed)
+        sample_seed = main_cfg.seed + idx
+        seed_everything(sample_seed)
+        generator = torch.Generator(device=device).manual_seed(sample_seed)
         
         reward_model.cfg.grad_const_scale = CFG.grad_const_scale
         reward_model.cfg.grad_norm = CFG.grad_norm
         
         # MCMC
-        latents = pipe.prepare_latents(height=main_cfg.height, width=main_cfg.width, reward_model=reward_model, generator=generator)
+        prepared_latents = pipe.prepare_latents(
+            height=main_cfg.height,
+            width=main_cfg.width,
+            reward_model=reward_model,
+            generator=generator,
+            return_initial_latents=main_cfg.save_baseline_comparison,
+        )
+        if main_cfg.save_baseline_comparison:
+            latents, initial_latents = prepared_latents
+        else:
+            latents = prepared_latents
 
         reward_model.cfg.grad_norm = CFG.smc_grad_norm
         reward_model.cfg.grad_const_scale = CFG.smc_grad_const_scale
@@ -63,6 +76,13 @@ def main(main_cfg, CFG, args, task_name):
         
         image = torchvision.transforms.ToPILImage()(final_latent[0].float().cpu().clamp(0, 1))
         image.save(os.path.join(args.save_dir, f"{idx:05d}.png"))
+        if main_cfg.save_baseline_comparison:
+            baseline_image = pipe.generate_baseline(
+                initial_latents,
+                num_inference_steps=main_cfg.baseline_num_inference_steps,
+            )
+            baseline_image.save(os.path.join(args.save_dir, f"{idx:05d}_baseline.png"))
+
         if args.save_reward:
             draw = ImageDraw.Draw(image)
             text = f"{sample_reward.item():.5f}" if hasattr(sample_reward, "item") else f"{sample_reward:.5f}"
@@ -81,12 +101,27 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", default="./results")
     parser.add_argument("--save_tweedies", action="store_true", help="Save the tweedies")
     parser.add_argument("--save_reward", action="store_true", help="Save the reward value on the image")
+    parser.add_argument(
+        "--save_baseline_comparison",
+        action="store_true",
+        help="Save vanilla FLUX output from the same raw initial noise",
+    )
+    parser.add_argument(
+        "--baseline_num_inference_steps",
+        type=int,
+        default=None,
+        help="Denoising steps for the optional vanilla FLUX baseline",
+    )
     parser.add_argument("--tag", default=None)
     parser.add_argument("--extra_tag", default=None)
 
 
     args, extras = parser.parse_known_args()
     CFG = load_config(args.config, cli_args=extras)
+    if args.save_baseline_comparison:
+        CFG.save_baseline_comparison = True
+    if args.baseline_num_inference_steps is not None:
+        CFG.baseline_num_inference_steps = args.baseline_num_inference_steps
 
     task_name = args.config.split("/")[-1].split(".")[0]
     main_cfg = Config(**CFG)
