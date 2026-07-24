@@ -27,10 +27,10 @@ CONDA_ROOT=/home/dcor/vishnevsky/anaconda3
 ENV_NAME=psi_sampler
 PYTHON="$CONDA_ROOT/envs/$ENV_NAME/bin/python"
 CONFIG="$REPO/config/creativity.yaml"
-DATA="$REPO/data/aesthetic.txt"
+DATA="$REPO/data/aesthetic_10.txt"
 RESULTS="$REPO/results_creativity_iem_full_h200_${SLURM_JOB_ID:-manual}"
 SHARED_HF_HUB=/home/dcor/vishnevsky/.cache/huggingface/hub
-LOCAL_HF_HOME=/tmp/huggingface-psi-${SLURM_JOB_ID:-manual}
+LOCAL_HF_HOME=/tmp/huggingface-psi
 LOCAL_HF_HUB="$LOCAL_HF_HOME/hub"
 FLUX_CACHE=models--black-forest-labs--FLUX.1-schnell
 

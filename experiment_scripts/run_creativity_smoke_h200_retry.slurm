@@ -30,7 +30,7 @@ CONFIG="$REPO/config/creativity.yaml"
 DATA="$REPO/data/aesthetic_smoke.txt"
 RESULTS="$REPO/results_creativity_iem_h200_retry_${SLURM_JOB_ID:-manual}"
 SHARED_HF_HUB=/home/dcor/vishnevsky/.cache/huggingface/hub
-LOCAL_HF_HOME=/tmp/huggingface-psi-${SLURM_JOB_ID:-manual}
+LOCAL_HF_HOME=/tmp/huggingface-psi
 LOCAL_HF_HUB="$LOCAL_HF_HOME/hub"
 FLUX_CACHE=models--black-forest-labs--FLUX.1-schnell
 
