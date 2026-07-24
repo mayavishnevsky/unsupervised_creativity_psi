@@ -33,6 +33,7 @@ SHARED_HF_HUB=/home/dcor/vishnevsky/.cache/huggingface/hub
 LOCAL_HF_HOME=/tmp/huggingface-psi
 LOCAL_HF_HUB="$LOCAL_HF_HOME/hub"
 FLUX_CACHE=models--black-forest-labs--FLUX.1-schnell
+FLUX_CACHE_SOURCE="${FLUX_CACHE_SOURCE_OVERRIDE:-$SHARED_HF_HUB/$FLUX_CACHE/}"
 
 mkdir -p \
   "$REPO/experiment_scripts/slurm_logs" \
@@ -53,7 +54,7 @@ stage_start=$SECONDS
 echo "Staging FLUX cache to $LOCAL_HF_HUB"
 (
   flock 9
-  rsync -a "$SHARED_HF_HUB/$FLUX_CACHE/" "$LOCAL_HF_HUB/$FLUX_CACHE/"
+  rsync -a "$FLUX_CACHE_SOURCE" "$LOCAL_HF_HUB/$FLUX_CACHE/"
 ) 9>/tmp/huggingface-psi-stage.lock
 echo "FLUX cache staged in $((SECONDS - stage_start)) seconds"
 

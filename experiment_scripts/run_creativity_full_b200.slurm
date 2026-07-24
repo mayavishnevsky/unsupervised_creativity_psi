@@ -18,5 +18,7 @@ set -eo pipefail
 
 export ENV_NAME_OVERRIDE=psi_sampler_b200
 export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-psi-b200-torch2_7
+export FLUX_CACHE_SOURCE_OVERRIDE=n-h200:/tmp/huggingface-psi/hub/models--black-forest-labs--FLUX.1-schnell/
+export RSYNC_RSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 exec bash /home/dcor/vishnevsky/unsupervised_creativity_psi/experiment_scripts/run_creativity_full_h200.slurm
