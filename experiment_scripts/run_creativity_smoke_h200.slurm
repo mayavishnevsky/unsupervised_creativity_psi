@@ -64,6 +64,19 @@ echo "Verifying FLUX cache in $LOCAL_HF_HUB"
 ) 9>/tmp/huggingface-psi-stage.lock
 echo "FLUX cache ready in $((SECONDS - stage_start)) seconds"
 
+FLUX_REVISION=$(tr -d '\r\n' <"$LOCAL_HF_HUB/$FLUX_CACHE/refs/main")
+FLUX_SNAPSHOT="$LOCAL_HF_HUB/$FLUX_CACHE/snapshots/$FLUX_REVISION"
+if [[ ! -f "$FLUX_SNAPSHOT/model_index.json" ]]; then
+  echo "Missing staged FLUX model_index.json: $FLUX_SNAPSHOT" >&2
+  exit 1
+fi
+BROKEN_LINK=$(find -L "$FLUX_SNAPSHOT" -type l -print -quit)
+if [[ -n "$BROKEN_LINK" ]]; then
+  echo "Broken staged FLUX snapshot link: $BROKEN_LINK" >&2
+  exit 1
+fi
+echo "FLUX snapshot: $FLUX_SNAPSHOT"
+
 export HF_HOME="$LOCAL_HF_HOME"
 export HF_DATASETS_CACHE="$LOCAL_HF_HOME/datasets"
 export HF_HUB_CACHE="$LOCAL_HF_HUB"
@@ -73,13 +86,21 @@ export TRANSFORMERS_OFFLINE=1
 
 source "$CONDA_ROOT/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
+
+NVIDIA_LIB_PATH=
+for lib_dir in "$CONDA_PREFIX"/lib/python3.10/site-packages/nvidia/*/lib; do
+  NVIDIA_LIB_PATH="${NVIDIA_LIB_PATH:+$NVIDIA_LIB_PATH:}$lib_dir"
+done
+export LD_LIBRARY_PATH="${NVIDIA_LIB_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 set -u
 
 cd "$REPO"
 
 "$PYTHON" - <<'PY'
+import ctypes
 import torch
 
+ctypes.CDLL("libnvrtc.so.12")
 if not torch.cuda.is_available():
     raise SystemExit("CUDA is unavailable")
 print(f"torch={torch.__version__}")
@@ -94,6 +115,7 @@ PY
   --save_reward \
   --save_baseline_comparison \
   log_timing=true \
+  pretrained_model_name_or_path="$FLUX_SNAPSHOT" \
   reference_sample_count=3 \
   reference_batch_size=1 \
   num_steps=2 \

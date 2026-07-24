@@ -42,6 +42,7 @@ class StochasticFluxPipeline():
     @dataclass
     class Config:
         model: str = "schnell"
+        pretrained_model_name_or_path: str = "black-forest-labs/FLUX.1-schnell"
         mini_batch_size: int = 5
         grad_minibatch_size: int = 1
         num_particles: int = 1
@@ -71,10 +72,11 @@ class StochasticFluxPipeline():
     def __init__(self, device, CFG):
         self.cfg = self.Config(**CFG)
         self.device = device
-        
-        model_id = "black-forest-labs/FLUX.1-schnell"
-        
-        self.pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16).to(self.device)
+
+        self.pipe = FluxPipeline.from_pretrained(
+            self.cfg.pretrained_model_name_or_path,
+            torch_dtype=torch.bfloat16,
+        ).to(self.device)
 
         # Compile transformer for faster inference
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
