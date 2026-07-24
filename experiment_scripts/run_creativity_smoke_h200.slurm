@@ -5,7 +5,7 @@
 #SBATCH --error=/home/dcor/vishnevsky/unsupervised_creativity_psi/experiment_scripts/slurm_logs/%x_%j.err
 #SBATCH --partition=gpu-h200
 #SBATCH --account=gpu-research
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --signal=USR1@1200
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
@@ -16,13 +16,9 @@
 
 set -eo pipefail
 
-export HF_HOME=/home/dcor/vishnevsky/.cache/huggingface
-export HF_DATASETS_CACHE=/home/dcor/vishnevsky/.cache/huggingface/datasets
-export HF_HUB_CACHE=/home/dcor/vishnevsky/.cache/huggingface/hub
-export TRANSFORMERS_CACHE=/home/dcor/vishnevsky/.cache/huggingface/transformers
 export PIP_CACHE_DIR=/home/dcor/vishnevsky/.cache/pip
 export MPLCONFIGDIR=/tmp/matplotlib-${SLURM_JOB_ID:-manual}
-export TORCHINDUCTOR_CACHE_DIR=/home/dcor/vishnevsky/.cache/torchinductor/psi_sampler_h200_torch2_5
+export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-psi-${SLURM_JOB_ID:-manual}
 export TORCHINDUCTOR_COMPILE_THREADS=${SLURM_CPUS_PER_TASK:-32}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -32,9 +28,18 @@ ENV_NAME=psi_sampler
 PYTHON="$CONDA_ROOT/envs/$ENV_NAME/bin/python"
 CONFIG="$REPO/config/creativity.yaml"
 DATA="$REPO/data/aesthetic_smoke.txt"
-RESULTS="$REPO/results_creativity_iem_h200"
+RESULTS="$REPO/results_creativity_iem_h200_24h_${SLURM_JOB_ID:-manual}"
+SHARED_HF_HUB=/home/dcor/vishnevsky/.cache/huggingface/hub
+LOCAL_HF_HOME=/tmp/huggingface-psi
+LOCAL_HF_HUB="$LOCAL_HF_HOME/hub"
+FLUX_CACHE=models--black-forest-labs--FLUX.1-schnell
 
-mkdir -p "$REPO/experiment_scripts/slurm_logs" "$RESULTS" "$MPLCONFIGDIR" "$TORCHINDUCTOR_CACHE_DIR"
+mkdir -p \
+  "$REPO/experiment_scripts/slurm_logs" \
+  "$RESULTS" \
+  "$MPLCONFIGDIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  "$LOCAL_HF_HUB"
 
 echo "Job starting at $(date)"
 echo "Repo: $REPO"
@@ -43,6 +48,28 @@ echo "Data: $DATA"
 echo "Results: $RESULTS"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi
+
+while pgrep -u "$(id -u)" -f \
+  "^rsync -a $SHARED_HF_HUB/$FLUX_CACHE/ $LOCAL_HF_HUB/$FLUX_CACHE/" \
+  >/dev/null; do
+  echo "Waiting for the active FLUX cache staging process"
+  sleep 60
+done
+
+stage_start=$SECONDS
+echo "Verifying FLUX cache in $LOCAL_HF_HUB"
+(
+  flock 9
+  rsync -a "$SHARED_HF_HUB/$FLUX_CACHE/" "$LOCAL_HF_HUB/$FLUX_CACHE/"
+) 9>/tmp/huggingface-psi-stage.lock
+echo "FLUX cache ready in $((SECONDS - stage_start)) seconds"
+
+export HF_HOME="$LOCAL_HF_HOME"
+export HF_DATASETS_CACHE="$LOCAL_HF_HOME/datasets"
+export HF_HUB_CACHE="$LOCAL_HF_HUB"
+export TRANSFORMERS_CACHE="$LOCAL_HF_HOME/transformers"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 
 source "$CONDA_ROOT/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
