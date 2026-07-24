@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import torch
 
-from src.utils import ignore_kwargs, retrieve_latents
+from src.utils import ignore_kwargs, retrieve_latents, synchronized_time
 from src.scheduler import get_scheduler
 from src.mcmc import get_mcmc
 from diffusers import FluxPipeline
@@ -66,6 +66,7 @@ class StochasticFluxPipeline():
 
         save_vram : bool = False
         split_gpus: bool = False
+        log_timing: bool = False
 
     def __init__(self, device, CFG):
         self.cfg = self.Config(**CFG)
@@ -113,6 +114,32 @@ class StochasticFluxPipeline():
         self.negative_prompt_embeds = None
         self.height = None
         self.width = None
+        self.reset_timing()
+
+    def _timing_start(self):
+        if not getattr(self.cfg, "log_timing", False):
+            return None
+        return synchronized_time(self.device)
+
+    def _record_timing(self, name, start):
+        if start is None:
+            return
+        elapsed = synchronized_time(self.device) - start
+        self._timing_totals[name] = self._timing_totals.get(name, 0.0) + elapsed
+        self._timing_counts[name] = self._timing_counts.get(name, 0) + 1
+
+    def reset_timing(self):
+        self._timing_totals = {}
+        self._timing_counts = {}
+
+    def print_timing(self, context):
+        if not getattr(self.cfg, "log_timing", False):
+            return
+        values = []
+        for name in sorted(self._timing_totals):
+            values.append(f"{name}_seconds={self._timing_totals[name]:.3f}")
+            values.append(f"{name}_calls={self._timing_counts[name]}")
+        print(f"[timing] {context} {' '.join(values)}", flush=True)
 
     def unload_encoder(self):
         self.pipe.text_encoder.to("cpu")
@@ -526,11 +553,21 @@ class StochasticFluxPipeline():
             cur_batch_size = min(self.cfg.grad_minibatch_size, latents.shape[0] - i)
             cur_latents = latents[i : i + cur_batch_size].clone().detach().requires_grad_()
             cur_t = t[i : i + cur_batch_size]
+
+            timing_start = self._timing_start()
             cur_vel_pred = self.forward(cur_latents, cur_t)
+            self._record_timing("outer_velocity", timing_start)
+
+            timing_start = self._timing_start()
             tweedie = self.get_tweedie(cur_latents, cur_vel_pred, cur_t)
+            self._record_timing("outer_tweedie", timing_start)
 
             if reward_input_type == "latent":
+                timing_start = self._timing_start()
                 cur_reward_values = reward_model(tweedie, self)
+                self._record_timing("reward_forward", timing_start)
+
+                timing_start = self._timing_start()
                 with torch.no_grad():
                     if not reward_model.cfg.decode_to_unnormalized:
                         decoded_tweedies = self.decode_latents(
@@ -540,17 +577,27 @@ class StochasticFluxPipeline():
                         decoded_tweedies = self.decode_latents_no_normalize(
                             tweedie.detach()
                         )
+                self._record_timing("reward_decode", timing_start)
             else:
+                timing_start = self._timing_start()
                 if not reward_model.cfg.decode_to_unnormalized:
                     decoded_tweedies = self.decode_latents(tweedie, output_type="pt")
                 else:
                     decoded_tweedies = self.decode_latents_no_normalize(tweedie)
+                self._record_timing("reward_decode", timing_start)
+
+                timing_start = self._timing_start()
                 cur_reward_values = reward_model(
                     decoded_tweedies.to(torch.float32), self
                 )
+                self._record_timing("reward_forward", timing_start)
 
             if return_grad:
+                timing_start = self._timing_start()
                 cur_grad = torch.autograd.grad(cur_reward_values, cur_latents, torch.ones_like(cur_reward_values), allow_unused=True)[0]
+                self._record_timing("reward_backward", timing_start)
+
+                timing_start = self._timing_start()
                 cur_grad = cur_grad.nan_to_num()
                 if reward_model.cfg.grad_norm is not None:
                     cur_grad = cur_grad.to(torch.float32)
@@ -560,6 +607,7 @@ class StochasticFluxPipeline():
                     cur_grad = cur_grad.to(latents.dtype)
                 elif reward_model.cfg.grad_const_scale is not None:
                     cur_grad = cur_grad * reward_model.cfg.grad_const_scale
+                self._record_timing("reward_gradient_scale", timing_start)
 
             reward_list.append(cur_reward_values.detach().clone())
             grad_list.append(cur_grad.detach().clone()) if return_grad else None

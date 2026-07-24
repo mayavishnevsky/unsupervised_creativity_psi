@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import torch
 
 from src.flux_pipeline import StochasticFluxPipeline
+from src.utils import prompt_output_stem
 
 
 class _FakeFluxPipeline:
@@ -88,6 +89,14 @@ class BaselineComparisonTests(unittest.TestCase):
         self.assertEqual(kwargs["num_inference_steps"], 4)
         self.assertEqual(kwargs["height"], 512)
         self.assertEqual(kwargs["width"], 512)
+
+    def test_output_stem_contains_a_safe_prompt_and_hash(self):
+        stem = prompt_output_stem(7, "A cat / wearing a red hat!")
+
+        self.assertTrue(stem.startswith("00007_A_cat_wearing_a_red_hat_"))
+        self.assertNotIn("/", stem)
+        self.assertEqual(stem, prompt_output_stem(7, "A cat / wearing a red hat!"))
+        self.assertLessEqual(len(stem), 5 + 1 + 96 + 1 + 8)
 
 
 if __name__ == "__main__":

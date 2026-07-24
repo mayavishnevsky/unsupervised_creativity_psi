@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import math
 import random
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -22,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from src.reward_model import register_reward_model
-from src.utils import ignore_kwargs
+from src.utils import ignore_kwargs, synchronized_time
 
 
 Tensor = torch.Tensor
@@ -390,6 +389,7 @@ class IEMReward(nn.Module):
         reference_num_inference_steps: int = 4
         reference_seed: int = 30_000_000
         noise_seed: int = 90_000_000
+        log_timing: bool = False
 
     def __init__(self, dtype, device, save_dir, CFG):
         super().__init__()
@@ -415,6 +415,7 @@ class IEMReward(nn.Module):
         self.register_buffer("v_omega", None, persistent=False)
         self.reference_count = 0
         self.prepared = False
+        self._candidate_evaluation_count = 0
 
     def _validate_config(self) -> None:
         for name in (
@@ -429,6 +430,16 @@ class IEMReward(nn.Module):
                 raise ValueError(f"{name} must be positive")
         if self.cfg.reward_input_type != "latent":
             raise ValueError("the creativity reward requires reward_input_type=latent")
+
+    def _timing_start(self):
+        if not self.cfg.log_timing:
+            return None
+        return synchronized_time(self.device)
+
+    def _timing_elapsed(self, start):
+        if start is None:
+            return 0.0
+        return synchronized_time(self.device) - start
 
     def register_data(self, data) -> None:
         """Keep the reward-model interface used by the existing main loop."""
@@ -457,24 +468,33 @@ class IEMReward(nn.Module):
         if self.prepared:
             raise RuntimeError("IEM references have already been prepared")
 
+        total_start = synchronized_time(self.device)
         pipe.pipe.transformer.eval().requires_grad_(False)
+        sampling_start = self._timing_start()
         records = self.prompt_sampler.sample(
             self.cfg.reference_sample_count,
             seed=int(self.cfg.reference_seed) + int(self.cfg.seed),
             excluded_prompts=excluded_prompts,
         )
-        start_time = time.perf_counter()
+        reference_prompt_sampling_seconds = self._timing_elapsed(sampling_start)
+        reference_encoding_seconds = 0.0
+        reference_generation_seconds = 0.0
+        reference_feature_seconds = 0.0
+        reference_statistics_seconds = 0.0
         count, sum_phi, sum_phi_squared_norm = 0, None, None
         batch_size = int(self.cfg.reference_batch_size)
 
         for start in range(0, len(records), batch_size):
             batch_records = records[start : start + batch_size]
             prompts = [record.text for record in batch_records]
+
+            stage_start = self._timing_start()
             prompt_embeds, pooled_prompt_embeds, text_ids = pipe.pipe.encode_prompt(
                 prompt=prompts,
                 prompt_2=None,
                 device=self.device,
             )
+            reference_encoding_seconds += self._timing_elapsed(stage_start)
             generators = [
                 torch.Generator(device=self.device).manual_seed(
                     int(self.cfg.reference_seed)
@@ -483,6 +503,8 @@ class IEMReward(nn.Module):
                 )
                 for record in batch_records
             ]
+
+            stage_start = self._timing_start()
             endpoints = pipe.pipe(
                 prompt_embeds=prompt_embeds,
                 pooled_prompt_embeds=pooled_prompt_embeds,
@@ -494,6 +516,7 @@ class IEMReward(nn.Module):
                 generator=generators,
                 output_type="latent",
             ).images
+            reference_generation_seconds += self._timing_elapsed(stage_start)
 
             if self.noise_table is None:
                 self.noise_table = sample_iem_noise_table(
@@ -523,6 +546,7 @@ class IEMReward(nn.Module):
                     latent_image_ids=latent_image_ids,
                 )
 
+            stage_start = self._timing_start()
             features = iem_features(
                 endpoints,
                 predict_reference,
@@ -530,23 +554,41 @@ class IEMReward(nn.Module):
                 self.noise_table,
                 level_batch_size=int(self.cfg.level_batch_size),
             )
+            reference_feature_seconds += self._timing_elapsed(stage_start)
+
+            stage_start = self._timing_start()
             count, sum_phi, sum_phi_squared_norm = update_reference_sums(
                 count,
                 sum_phi,
                 sum_phi_squared_norm,
                 features,
             )
+            reference_statistics_seconds += self._timing_elapsed(stage_start)
 
+        stage_start = self._timing_start()
         self.mu_omega, self.v_omega = reference_statistics(
             count, sum_phi, sum_phi_squared_norm
         )
+        reference_statistics_seconds += self._timing_elapsed(stage_start)
         self.reference_count = count
         self.prepared = True
-        elapsed = time.perf_counter() - start_time
+        elapsed = synchronized_time(self.device) - total_start
         print(
             f"Prepared {count} fixed IEM references in {elapsed:.1f}s "
-            f"using {self.cfg.num_steps} probe levels"
+            f"using {self.cfg.num_steps} probe levels",
+            flush=True,
         )
+        if self.cfg.log_timing:
+            print(
+                "[timing] phase=reference_preparation "
+                f"prompt_sampling_seconds={reference_prompt_sampling_seconds:.3f} "
+                f"prompt_encoding_seconds={reference_encoding_seconds:.3f} "
+                f"endpoint_generation_seconds={reference_generation_seconds:.3f} "
+                f"iem_features_seconds={reference_feature_seconds:.3f} "
+                f"statistics_seconds={reference_statistics_seconds:.3f} "
+                f"total_seconds={elapsed:.3f}",
+                flush=True,
+            )
 
     def forward(self, x_0: Tensor, pipe) -> Tensor:
         """Score candidate Tweedie endpoints while retaining denoiser gradients."""
@@ -558,6 +600,7 @@ class IEMReward(nn.Module):
                 "candidate latent shape does not match the fixed IEM noise table"
             )
 
+        feature_start = self._timing_start()
         features = iem_features(
             x_0,
             pipe.predict,
@@ -565,6 +608,21 @@ class IEMReward(nn.Module):
             self.noise_table,
             level_batch_size=int(self.cfg.level_batch_size),
         )
-        return iem_reward_from_reference_statistics(
+        feature_seconds = self._timing_elapsed(feature_start)
+
+        score_start = self._timing_start()
+        score = iem_reward_from_reference_statistics(
             features, self.mu_omega, self.v_omega
         ).float()
+        score_seconds = self._timing_elapsed(score_start)
+        if self.cfg.log_timing:
+            self._candidate_evaluation_count += 1
+            print(
+                "[timing] phase=iem_candidate "
+                f"evaluation={self._candidate_evaluation_count} "
+                f"batch_size={x_0.shape[0]} "
+                f"features_seconds={feature_seconds:.3f} "
+                f"equation21_seconds={score_seconds:.3f}",
+                flush=True,
+            )
+        return score

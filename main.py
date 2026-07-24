@@ -22,15 +22,33 @@ class Config:
     width: int = 512
     save_baseline_comparison: bool = False
     baseline_num_inference_steps: int = 4
+    log_timing: bool = False
 
 def main(main_cfg, CFG, args, task_name):
     device = torch.device("cuda:0")
 
+    def timing_start():
+        if not main_cfg.log_timing:
+            return None
+        return synchronized_time(device)
+
+    def log_timing(stage, start, **values):
+        if start is None:
+            return
+        elapsed = synchronized_time(device) - start
+        details = " ".join(f"{key}={value}" for key, value in values.items())
+        print(
+            f"[timing] stage={stage} seconds={elapsed:.3f} {details}".rstrip(),
+            flush=True,
+        )
+
+    setup_start = timing_start()
     with suppress_print():
         time_sampler = TimeSampler(device, CFG)
         pipe = StochasticFluxPipeline(device, CFG)
         reward_model = get_reward_model(task_name)(torch.float32, device, args.save_dir, CFG)
         SMC_runner = SMC(CFG)
+    log_timing("model_and_reward_setup", setup_start)
 
     if args.data_path.endswith(".json"):
         dataset = json.load(open(args.data_path, 'r'))
@@ -52,14 +70,23 @@ def main(main_cfg, CFG, args, task_name):
         pipe.unload_encoder()
     
     for idx, data in enumerate(tqdm(dataset, total=len(dataset), desc="Benchmark")):
+        candidate_start = timing_start()
         data = data if isinstance(dataset, list) else dataset[data]
         prompt = data if isinstance(data, str) else data["prompt"]
         phrases = data['phrases'] if isinstance(data, dict) and "phrases" in data else None
+        output_stem = prompt_output_stem(idx, prompt)
 
+        stage_start = timing_start()
         pipe.load_encoder()
         pipe.encode_prompt(prompt, main_cfg.negative_prompt, phrases=phrases)
         reward_model.register_data(data)
         pipe.unload_encoder()
+        log_timing(
+            "candidate_prompt_encoding",
+            stage_start,
+            candidate=idx,
+            output_stem=output_stem,
+        )
 
         sample_seed = main_cfg.seed + idx
         seed_everything(sample_seed)
@@ -69,6 +96,8 @@ def main(main_cfg, CFG, args, task_name):
         reward_model.cfg.grad_norm = CFG.grad_norm
         
         # MCMC
+        pipe.reset_timing()
+        stage_start = timing_start()
         prepared_latents = pipe.prepare_latents(
             height=main_cfg.height,
             width=main_cfg.width,
@@ -80,22 +109,38 @@ def main(main_cfg, CFG, args, task_name):
             latents, initial_latents = prepared_latents
         else:
             latents = prepared_latents
+        log_timing("candidate_mcmc_and_initialization", stage_start, candidate=idx)
+        pipe.print_timing(f"candidate={idx} phase=mcmc")
 
         reward_model.cfg.grad_norm = CFG.smc_grad_norm
         reward_model.cfg.grad_const_scale = CFG.smc_grad_const_scale
 
         # SMC
+        pipe.reset_timing()
+        stage_start = timing_start()
         sample, sample_reward = SMC_runner.run(pipe, time_sampler, reward_model, latents, generator, idx=idx)
+        log_timing("candidate_smc", stage_start, candidate=idx)
+        pipe.print_timing(f"candidate={idx} phase=smc")
+
+        stage_start = timing_start()
         final_latent = pipe.decode_latents(sample.detach(), output_type="pt")
+        log_timing("candidate_final_decode", stage_start, candidate=idx)
         
         image = torchvision.transforms.ToPILImage()(final_latent[0].float().cpu().clamp(0, 1))
-        image.save(os.path.join(args.save_dir, f"{idx:05d}.png"))
+        stage_start = timing_start()
+        image.save(os.path.join(args.save_dir, f"{output_stem}.png"))
+        log_timing("candidate_image_save", stage_start, candidate=idx)
+
         if main_cfg.save_baseline_comparison:
+            stage_start = timing_start()
             baseline_image = pipe.generate_baseline(
                 initial_latents,
                 num_inference_steps=main_cfg.baseline_num_inference_steps,
             )
-            baseline_image.save(os.path.join(args.save_dir, f"{idx:05d}_baseline.png"))
+            baseline_image.save(
+                os.path.join(args.save_dir, f"{output_stem}_baseline.png")
+            )
+            log_timing("candidate_baseline_generation", stage_start, candidate=idx)
 
         if args.save_reward:
             draw = ImageDraw.Draw(image)
@@ -106,7 +151,17 @@ def main(main_cfg, CFG, args, task_name):
             if "layout_to_image" in task_name:
                 draw_box(image, data['bboxes'], phrases, main_cfg.height, main_cfg.width)
                 
-            image.save(os.path.join(args.save_dir, "img_rewards", f"{idx:05d}.png"))
+            image.save(
+                os.path.join(args.save_dir, "img_rewards", f"{output_stem}.png")
+            )
+        if main_cfg.log_timing:
+            log_timing(
+                "candidate_total",
+                candidate_start,
+                candidate=idx,
+                reward=float(sample_reward.detach().float().cpu()),
+                output_stem=output_stem,
+            )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

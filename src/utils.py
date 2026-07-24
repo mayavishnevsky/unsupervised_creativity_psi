@@ -3,6 +3,9 @@ import sys
 from dataclasses import fields
 import random
 import math
+import hashlib
+import re
+import time
 from numba import jit
 import gc
 
@@ -87,6 +90,28 @@ def seed_everything(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def synchronized_time(device=None):
+    """Return wall-clock time after pending work on the selected GPU completes."""
+
+    if device is not None:
+        device = torch.device(device)
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+    return time.perf_counter()
+
+
+def prompt_output_stem(index, prompt, max_prompt_chars=96):
+    """Build a readable, bounded, collision-resistant output stem."""
+
+    prompt = str(prompt).strip()
+    slug = re.sub(r"[^\w]+", "_", prompt).strip("_")
+    if not slug:
+        slug = "prompt"
+    slug = slug[: int(max_prompt_chars)].rstrip("_")
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8]
+    return f"{int(index):05d}_{slug}_{digest}"
 
 
 def tensor2PIL(tensor, do_normalize=False):

@@ -78,8 +78,15 @@ pip install -r requirements.txt
 
 - `--save_reward` : Display the reward value on the saved images.
 - `--save_tweedies` : Save the step-wise particle tweedies for each MCMC and SMC process.
-- `--save_baseline_comparison` : Save a vanilla FLUX image as `<index>_baseline.png` from the same raw noise used to initialize Ψ-Sampler. Disabled by default.
+- `--save_baseline_comparison` : Save a vanilla FLUX image as `<prompt-stem>_baseline.png` from the same raw noise used to initialize Ψ-Sampler. Disabled by default.
 - `--baseline_num_inference_steps 4` : Number of vanilla FLUX denoising steps used for the optional baseline image.
+- `log_timing=true` : Emit synchronized timings for reference preparation,
+  MCMC/SMC, IEM reward evaluation, backward passes, decoding, and baseline
+  generation.
+
+Generated image names include a readable prompt slug and short prompt hash,
+for example `00000_cat_77af778b.png` and
+`00000_cat_77af778b_baseline.png`.
 
 </details>
 
@@ -137,6 +144,8 @@ IEM is substantially more expensive than image-space rewards because every
 reward evaluation differentiates through `num_steps` additional frozen FLUX
 denoiser calls. `experiment_scripts/run_creativity_smoke_h100.slurm` provides a
 small two-level, three-reference integration check.
+`experiment_scripts/run_creativity_smoke_h200.slurm` runs that check on H200
+with timing and matched baseline output enabled.
 
 ### Quantity-Aware Generation
 
