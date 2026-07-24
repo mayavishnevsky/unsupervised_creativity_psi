@@ -113,6 +113,34 @@ class FormulaTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(x_0.grad).all())
         self.assertGreater(x_0.grad.abs().sum().item(), 0.0)
 
+    def test_checkpointed_candidate_features_preserve_values_and_gradients(self):
+        schedule = iem_sigma_schedule(1.0, 4.0, 3)
+        noise = sample_iem_noise_table(
+            schedule,
+            (2,),
+            device="cpu",
+            dtype=torch.float32,
+            seed=17,
+        )
+
+        def evaluate(use_checkpoint):
+            x_0 = torch.tensor([[0.5, -1.0]], requires_grad=True)
+            features = iem_features(
+                x_0,
+                lambda x_t, t: 0.25 * x_t + t[:, None],
+                schedule,
+                noise,
+                checkpoint_velocity_prediction=use_checkpoint,
+            )
+            features.square().sum().backward()
+            return features.detach(), x_0.grad.detach()
+
+        direct_features, direct_gradient = evaluate(False)
+        checkpointed_features, checkpointed_gradient = evaluate(True)
+
+        torch.testing.assert_close(checkpointed_features, direct_features)
+        torch.testing.assert_close(checkpointed_gradient, direct_gradient)
+
     def test_noise_table_is_fixed_and_shared_across_endpoints(self):
         schedule = iem_sigma_schedule(1.0, 10.0, 3)
         first = sample_iem_noise_table(

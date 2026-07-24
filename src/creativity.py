@@ -19,6 +19,7 @@ from typing import Callable, Iterable, Sequence
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from src.reward_model import register_reward_model
 from src.utils import ignore_kwargs, synchronized_time
@@ -248,6 +249,7 @@ def iem_features(
     sigma_schedule: Tensor | Sequence[float],
     noise_table: Tensor,
     level_batch_size: int = 1,
+    checkpoint_velocity_prediction: bool = False,
 ) -> Tensor:
     """Compute the finite IEM feature map ``Phi(x_0)`` from equations 14/16.
 
@@ -303,7 +305,16 @@ def iem_features(
 
         flat_x_t = x_t_32.to(dtype=x_0.dtype).flatten(0, 1)
         flat_t = flow_time[:, None].expand(-1, x_0.shape[0]).reshape(-1)
-        velocity = velocity_prediction(flat_x_t, flat_t).reshape_as(x_t_32)
+        if checkpoint_velocity_prediction and torch.is_grad_enabled():
+            velocity = checkpoint(
+                velocity_prediction,
+                flat_x_t,
+                flat_t,
+                use_reentrant=False,
+            )
+        else:
+            velocity = velocity_prediction(flat_x_t, flat_t)
+        velocity = velocity.reshape_as(x_t_32)
 
         # Equation 14, followed by the weighted residual blocks in equation 16.
         flow_time_32 = flow_time.reshape((-1, 1) + broadcast_tail)
@@ -426,6 +437,7 @@ class IEMReward(nn.Module):
         sigma_max: float = 1000.0
         num_steps: int = 64
         level_batch_size: int = 4
+        checkpoint_candidate_features: bool = True
         noise_table_mode: str = "fixed"
         noise_table_count: int = 1
         reference_prompt_files: tuple[str, ...] = ()
@@ -747,6 +759,9 @@ class IEMReward(nn.Module):
             self.sigma_schedule,
             noise_table,
             level_batch_size=int(self.cfg.level_batch_size),
+            checkpoint_velocity_prediction=bool(
+                self.cfg.checkpoint_candidate_features
+            ),
         )
         feature_seconds = self._timing_elapsed(feature_start)
 

@@ -79,6 +79,7 @@ sigma_min: 1.0
 sigma_max: 1000.0
 num_steps: 64
 level_batch_size: 4
+checkpoint_candidate_features: true
 # Use "staged" with noise_table_count=8 to spread tables across reward rounds.
 noise_table_mode: fixed
 noise_table_count: 1

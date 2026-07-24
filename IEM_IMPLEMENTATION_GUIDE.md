@@ -428,6 +428,15 @@ through transformer operations with respect to their latent inputs. This is
 verified in
 [`tests/test_creativity.py:246`](tests/test_creativity.py#L246).
 
+Candidate probe calls use non-reentrant activation checkpointing by default.
+Instead of retaining the frozen FLUX transformer's activations for all 64
+levels until equation 21 is differentiated, backward recomputes each probe
+chunk. This preserves the feature values and candidate gradients while bounding
+peak activation memory. It increases denoiser compute during backward and does
+not apply to no-grad reference features. The full H200 launcher additionally
+uses `level_batch_size=1`; this changes only probe batching, not the schedule,
+noise, feature definition, or reward.
+
 ### Decode behavior
 
 IEM does not use decoded images for its score. However, the current shared
@@ -711,6 +720,7 @@ the inexpensive equation-21 reduction
 | `sigma_max` | 1000 | Largest VE sigma boundary. |
 | `num_steps` | 64 | Number of equation-16 integration intervals. |
 | `level_batch_size` | 4 | Levels assembled per `iem_features` chunk; matches the RAM default. |
+| `checkpoint_candidate_features` | `true` | Recompute candidate probe denoisers during backward instead of retaining every level's transformer activations. |
 | `noise_table_mode` | `fixed` | `fixed` uses one table; `staged` changes tables across reward-round windows. |
 | `noise_table_count` | 1 | Tables prepared and used. Set to 8 with `staged` for eight windows. |
 | `reference_sample_count` | 48 | Total fixed reference endpoints. |
@@ -809,3 +819,5 @@ FLUX uses the same linear rectified-flow velocity parameterization required by
   the expected dominant cost at full settings.
 - `level_batch_size` can change batching and memory use, but not the selected
   sigmas, noise tables, feature definition, or equation-21 result.
+- Disabling `checkpoint_candidate_features` at 64 levels can retain enough
+  transformer activations to exhaust even a 140 GB H200.

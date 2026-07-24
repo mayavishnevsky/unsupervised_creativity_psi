@@ -18,16 +18,16 @@ set -eo pipefail
 
 export PIP_CACHE_DIR=/home/dcor/vishnevsky/.cache/pip
 export MPLCONFIGDIR=/tmp/matplotlib-${SLURM_JOB_ID:-manual}
-export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-psi-h200-torch2_5
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/tmp/torchinductor-psi-h200-torch2_5}"
 export TORCHINDUCTOR_COMPILE_THREADS=${SLURM_CPUS_PER_TASK:-32}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 REPO=/home/dcor/vishnevsky/unsupervised_creativity_psi
 CONDA_ROOT=/home/dcor/vishnevsky/anaconda3
-ENV_NAME=psi_sampler
+ENV_NAME="${ENV_NAME_OVERRIDE:-psi_sampler}"
 PYTHON="$CONDA_ROOT/envs/$ENV_NAME/bin/python"
 CONFIG="$REPO/config/creativity.yaml"
-DATA="$REPO/data/aesthetic_10.txt"
+DATA="${DATA_OVERRIDE:-$REPO/data/aesthetic_10.txt}"
 RESULTS="$REPO/results_creativity_iem_full_h200_${SLURM_JOB_ID:-manual}"
 SHARED_HF_HUB=/home/dcor/vishnevsky/.cache/huggingface/hub
 LOCAL_HF_HOME=/tmp/huggingface-psi
@@ -115,7 +115,8 @@ PY
   reference_batch_size=1 \
   reference_num_inference_steps=4 \
   num_steps=64 \
-  level_batch_size=4 \
+  level_batch_size=1 \
+  checkpoint_candidate_features=true \
   num_mcmc_steps=25 \
   num_chains=5 \
   burn_in=25 \
