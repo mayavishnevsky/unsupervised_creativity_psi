@@ -119,6 +119,10 @@ through the IEM denoiser probes and back into the Psi particle. Reference
 endpoints and their feature statistics are generated once before sampling
 under `torch.no_grad()`.
 
+See [`IEM_IMPLEMENTATION_GUIDE.md`](IEM_IMPLEMENTATION_GUIDE.md) for the full
+data flow, equations, reference counts, gradient path, and exact reward-call
+counts for both default and smoke configurations.
+
 The default `config/creativity.yaml`:
 
 - draws 48 balanced reference prompts from the PickScore, OCR, and GenEval
