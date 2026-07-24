@@ -76,6 +76,8 @@ class AestheticRewardModel(nn.Module):
         inputs = F.interpolate(images, (self.target_size, self.target_size), mode='bilinear', align_corners=False)
         inputs = self.normalize(inputs).to(self.dtype)
         embed = self.clip.get_image_features(pixel_values=inputs)
+        if hasattr(embed, "pooler_output"):
+            embed = embed.pooler_output
         embed = embed / torch.linalg.vector_norm(embed, dim=-1, keepdim=True)
         score = self.mlp(embed).squeeze(1)
         return score
