@@ -18,7 +18,7 @@ set -eo pipefail
 
 export PIP_CACHE_DIR=/home/dcor/vishnevsky/.cache/pip
 export MPLCONFIGDIR=/tmp/matplotlib-${SLURM_JOB_ID:-manual}
-export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-psi-${SLURM_JOB_ID:-manual}
+export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-psi-h200-torch2_5
 export TORCHINDUCTOR_COMPILE_THREADS=${SLURM_CPUS_PER_TASK:-32}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

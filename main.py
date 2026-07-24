@@ -133,10 +133,14 @@ def main(main_cfg, CFG, args, task_name):
 
         if main_cfg.save_baseline_comparison:
             stage_start = timing_start()
-            baseline_image = pipe.generate_baseline(
-                initial_latents,
-                num_inference_steps=main_cfg.baseline_num_inference_steps,
-            )
+            pipe.load_encoder()
+            try:
+                baseline_image = pipe.generate_baseline(
+                    initial_latents,
+                    num_inference_steps=main_cfg.baseline_num_inference_steps,
+                )
+            finally:
+                pipe.unload_encoder()
             baseline_image.save(
                 os.path.join(args.save_dir, f"{output_stem}_baseline.png")
             )

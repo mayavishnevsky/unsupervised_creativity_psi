@@ -263,7 +263,7 @@ class StochasticFluxPipeline():
             width=self.width,
             num_inference_steps=num_inference_steps,
             num_images_per_prompt=1,
-            latents=initial_latents[:1].detach().clone(),
+            latents=initial_latents[:1].detach().clone().to(self.device),
             output_type="pil",
         )
         return output.images[0]
