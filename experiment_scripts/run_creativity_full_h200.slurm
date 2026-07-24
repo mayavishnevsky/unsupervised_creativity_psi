@@ -28,7 +28,9 @@ ENV_NAME="${ENV_NAME_OVERRIDE:-psi_sampler}"
 PYTHON="$CONDA_ROOT/envs/$ENV_NAME/bin/python"
 CONFIG="$REPO/config/creativity.yaml"
 DATA="${DATA_OVERRIDE:-$REPO/data/aesthetic_10.txt}"
-RESULTS="$REPO/results_creativity_iem_full_h200_${SLURM_JOB_ID:-manual}"
+RESULTS_PREFIX="${RESULTS_PREFIX_OVERRIDE:-results_creativity_iem_full_h200}"
+RESULTS="$REPO/${RESULTS_PREFIX}_${SLURM_JOB_ID:-manual}"
+RUN_TAG="${RUN_TAG_OVERRIDE:-full_h200_fixed_noise}"
 SHARED_HF_HUB=/home/dcor/vishnevsky/.cache/huggingface/hub
 LOCAL_HF_HOME=/tmp/huggingface-psi
 LOCAL_HF_HUB="$LOCAL_HF_HOME/hub"
@@ -54,7 +56,22 @@ stage_start=$SECONDS
 echo "Staging FLUX cache to $LOCAL_HF_HUB"
 (
   flock 9
-  rsync -a "$FLUX_CACHE_SOURCE" "$LOCAL_HF_HUB/$FLUX_CACHE/"
+  CACHE_READY=false
+  LOCAL_FLUX_CACHE="$LOCAL_HF_HUB/$FLUX_CACHE"
+  if [[ -f "$LOCAL_FLUX_CACHE/refs/main" ]]; then
+    CACHED_REVISION=$(tr -d '\r\n' <"$LOCAL_FLUX_CACHE/refs/main")
+    CACHED_SNAPSHOT="$LOCAL_FLUX_CACHE/snapshots/$CACHED_REVISION"
+    CACHED_BROKEN_LINK=$(find -L "$CACHED_SNAPSHOT" -type l -print -quit)
+    if [[ -f "$CACHED_SNAPSHOT/model_index.json" && -z "$CACHED_BROKEN_LINK" ]]; then
+      CACHE_READY=true
+    fi
+  fi
+
+  if [[ "$CACHE_READY" == true ]]; then
+    echo "Reusing complete node-local FLUX cache"
+  else
+    rsync -a "$FLUX_CACHE_SOURCE" "$LOCAL_FLUX_CACHE/"
+  fi
 ) 9>/tmp/huggingface-psi-stage.lock
 echo "FLUX cache staged in $((SECONDS - stage_start)) seconds"
 
@@ -102,7 +119,7 @@ print(f"gpu={torch.cuda.get_device_name(0)}")
 PY
 
 "$PYTHON" -u main.py \
-  --tag full_h200_fixed_noise \
+  --tag "$RUN_TAG" \
   --config "$CONFIG" \
   --data_path "$DATA" \
   --save_dir "$RESULTS" \
