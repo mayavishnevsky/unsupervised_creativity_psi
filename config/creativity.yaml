@@ -1,0 +1,89 @@
+#####################################################
+# General Config
+#####################################################
+
+tag: ${prompt}
+seed: 0
+height: 512
+width: 512
+save_baseline_comparison: false
+baseline_num_inference_steps: 4
+
+prompt: ""
+negative_prompt: null
+
+time_schedule: linear
+
+#####################################################
+# Stochastic Few Step Model Config
+#####################################################
+
+model: "flux"
+mini_batch_size: 1
+grad_minibatch_size: 1
+true_cfg_scale: 1.0
+guidance_scale: 3.5 # Not used for FLUX.1-Schnell
+
+original_scheduler: linear
+new_scheduler: vp
+sample_method: sde
+diffuse_coeff_func: rev_original
+diffusion_norm: 1.0
+
+save_vram: true
+
+#####################################################
+# MCMC Config
+#####################################################
+
+mcmc: pcnl
+alpha_mcmc: 0.1
+
+step_size: 0.5
+num_mcmc_steps: 25
+num_chains: 5
+burn_in: 25
+custom_call_function_name: chains_thinning
+grad_norm: 0.0004
+grad_const_scale: null
+
+rho: null
+mcmc_scheduler: uniform
+
+#####################################################
+# SMC Config
+#####################################################
+
+runner: smc
+alpha: 0.1
+num_particles: 10
+num_inference_steps: 25
+ess_threshold: 0.5
+smc_grad_norm: 0.0004
+smc_grad_const_scale: null
+
+return_max_reward: true
+init_weight_method: reward
+grad_scale: 1.0
+
+#####################################################
+# IEM Reward Config
+#####################################################
+
+reward_input_type: latent
+decode_to_unnormalized: false
+
+sigma_min: 1.0
+sigma_max: 1000.0
+num_steps: 64
+level_batch_size: 1
+
+reference_prompt_files:
+  - ../unsupervised_creativity_ram/prompts/pickscore/train.txt
+  - ../unsupervised_creativity_ram/prompts/ocr/train.txt
+  - ../unsupervised_creativity_ram/prompts/geneval/train.txt
+reference_sample_count: 48
+reference_batch_size: 1
+reference_num_inference_steps: 4
+reference_seed: 30000000
+noise_seed: 90000000

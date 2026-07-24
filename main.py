@@ -9,6 +9,7 @@ from src.utils import *
 from src.flux_pipeline import StochasticFluxPipeline, TimeSampler
 from src.runner import *
 from src.reward_model import *
+import src.creativity  # Registers the optional IEM reward.
 from src.mcmc import pCNL
 
 
@@ -36,6 +37,19 @@ def main(main_cfg, CFG, args, task_name):
     else:
         with open(args.data_path, 'r') as f:
             dataset = [line.strip() for line in f if line.strip() != '']
+
+    if hasattr(reward_model, "prepare_references"):
+        dataset_values = dataset if isinstance(dataset, list) else dataset.values()
+        candidate_prompts = [
+            data if isinstance(data, str) else data["prompt"]
+            for data in dataset_values
+        ]
+        pipe.load_encoder()
+        reward_model.prepare_references(
+            pipe,
+            excluded_prompts=candidate_prompts,
+        )
+        pipe.unload_encoder()
     
     for idx, data in enumerate(tqdm(dataset, total=len(dataset), desc="Benchmark")):
         data = data if isinstance(dataset, list) else dataset[data]

@@ -103,6 +103,41 @@ You may optionally override configuration values by specifying arguments directl
 CUDA_VISIBLE_DEVICES={$DEVICE} python main.py --tag aesthetic --config ./config/aesthetic.yaml --data_path ./data/aesthetic.txt --save_dir ./results_aesthetic --alpha_mcmc={$VALUE} --save_reward --save_tweedies
 ```
 
+### IEM Creativity Reward
+
+`src/creativity.py` implements the latent Information Estimation Metric (IEM)
+from equations 14, 16, and 21 of *Unsupervised Creative Generation*. The
+candidate input is the differentiable Tweedie `x_0` estimate: gradients pass
+through the IEM denoiser probes and back into the Psi particle. Reference
+endpoints and their feature statistics are generated once before sampling
+under `torch.no_grad()`.
+
+The default `config/creativity.yaml`:
+
+- draws 48 balanced reference prompts from the PickScore, OCR, and GenEval
+  files in the sibling `unsupervised_creativity_ram` checkout;
+- excludes every prompt in the current candidate dataset from that draw;
+- generates one vanilla FLUX.1-schnell endpoint per reference with four steps;
+- uses one deterministic noise table for every reference and candidate; and
+- evaluates 64 log-uniform sigma intervals from 1000 down to 1.
+
+Prompt files, reference count, seeds, sigma bounds, integration levels, and
+batch sizes can be changed in YAML or with OmegaConf command-line overrides:
+
+```
+CUDA_VISIBLE_DEVICES={$DEVICE} python main.py \
+  --tag creativity \
+  --config ./config/creativity.yaml \
+  --data_path ./data/aesthetic.txt \
+  --save_dir ./results_creativity \
+  reference_sample_count=48 num_steps=64
+```
+
+IEM is substantially more expensive than image-space rewards because every
+reward evaluation differentiates through `num_steps` additional frozen FLUX
+denoiser calls. `experiment_scripts/run_creativity_smoke_h100.slurm` provides a
+small two-level, three-reference integration check.
+
 ### Quantity-Aware Generation
 
 This task requires checkpoints from [T2ICount](https://github.com/cha15yq/T2ICount). Download the following files to `misc/t2icount/`:

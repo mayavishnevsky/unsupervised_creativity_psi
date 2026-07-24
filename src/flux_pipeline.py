@@ -238,6 +238,53 @@ class StochasticFluxPipeline():
             output_type="pil",
         )
         return output.images[0]
+
+    def predict_conditioned(
+        self,
+        latents,
+        t,
+        *,
+        prompt_embeds,
+        pooled_prompt_embeds,
+        text_ids,
+        latent_image_ids,
+    ):
+        """Predict native FLUX velocity for batch-aligned prompt conditions."""
+
+        if t.dtype != torch.float32:
+            raise ValueError(f"t must be float32, but got {t.dtype}")
+        if latents.shape[0] != t.shape[0]:
+            raise ValueError("time must be given in batch manner")
+        if (
+            prompt_embeds.shape[0] != latents.shape[0]
+            or pooled_prompt_embeds.shape[0] != latents.shape[0]
+        ):
+            raise ValueError("condition batches must match the latent batch")
+
+        vel_pred = []
+        for i in range(0, latents.shape[0], self.cfg.mini_batch_size):
+            stop = min(i + self.cfg.mini_batch_size, latents.shape[0])
+            cur_latents = latents[i:stop]
+            cur_t = t[i:stop].to(latents.dtype)
+            cur_guidance = (
+                self.guidance.expand(cur_latents.shape[0])
+                if self.guidance is not None
+                else None
+            )
+            vel_pred.append(
+                self.pipe.transformer(
+                    hidden_states=cur_latents,
+                    timestep=cur_t,
+                    guidance=cur_guidance,
+                    pooled_projections=pooled_prompt_embeds[i:stop],
+                    encoder_hidden_states=prompt_embeds[i:stop],
+                    txt_ids=text_ids,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs={},
+                    return_dict=False,
+                )[0]
+            )
+        return torch.cat(vel_pred, dim=0)
     
     def predict(self, latents, t):
         vel_pred = list()
@@ -471,6 +518,9 @@ class StochasticFluxPipeline():
         grad_list = list()
         vel_pred_list = list()
         tweedie_list = list()
+        reward_input_type = getattr(reward_model.cfg, "reward_input_type", "image")
+        if reward_input_type not in ("image", "latent"):
+            raise ValueError(f"unknown reward_input_type: {reward_input_type}")
 
         for i in range(0, latents.shape[0], self.cfg.grad_minibatch_size):
             cur_batch_size = min(self.cfg.grad_minibatch_size, latents.shape[0] - i)
@@ -478,12 +528,26 @@ class StochasticFluxPipeline():
             cur_t = t[i : i + cur_batch_size]
             cur_vel_pred = self.forward(cur_latents, cur_t)
             tweedie = self.get_tweedie(cur_latents, cur_vel_pred, cur_t)
-            if not reward_model.cfg.decode_to_unnormalized:
-                decoded_tweedies = self.decode_latents(tweedie, output_type="pt")
-            else:
-                decoded_tweedies = self.decode_latents_no_normalize(tweedie)
 
-            cur_reward_values = reward_model(decoded_tweedies.to(torch.float32), self)  # torch.float32
+            if reward_input_type == "latent":
+                cur_reward_values = reward_model(tweedie, self)
+                with torch.no_grad():
+                    if not reward_model.cfg.decode_to_unnormalized:
+                        decoded_tweedies = self.decode_latents(
+                            tweedie.detach(), output_type="pt"
+                        )
+                    else:
+                        decoded_tweedies = self.decode_latents_no_normalize(
+                            tweedie.detach()
+                        )
+            else:
+                if not reward_model.cfg.decode_to_unnormalized:
+                    decoded_tweedies = self.decode_latents(tweedie, output_type="pt")
+                else:
+                    decoded_tweedies = self.decode_latents_no_normalize(tweedie)
+                cur_reward_values = reward_model(
+                    decoded_tweedies.to(torch.float32), self
+                )
 
             if return_grad:
                 cur_grad = torch.autograd.grad(cur_reward_values, cur_latents, torch.ones_like(cur_reward_values), allow_unused=True)[0]
@@ -515,20 +579,32 @@ class StochasticFluxPipeline():
     def get_reward_grad(self, latents, reward_model, is_pixel_space=False, return_grad=True):
         reward_list = list()
         grad_list = list()
+        reward_input_type = getattr(reward_model.cfg, "reward_input_type", "image")
+        if reward_input_type not in ("image", "latent"):
+            raise ValueError(f"unknown reward_input_type: {reward_input_type}")
 
         for i in range(0, latents.shape[0], self.cfg.grad_minibatch_size):
             cur_batch_size = min(self.cfg.grad_minibatch_size, latents.shape[0] - i)
             cur_latents = latents[i : i + cur_batch_size].detach().requires_grad_()
             
-            if not is_pixel_space:
+            if reward_input_type == "latent":
+                reward_input = cur_latents
+            elif not is_pixel_space:
                 if not reward_model.cfg.decode_to_unnormalized:
-                    decoded_tweedies = self.decode_latents(cur_latents, output_type="pt")
+                    reward_input = self.decode_latents(
+                        cur_latents, output_type="pt"
+                    )
                 else:
-                    decoded_tweedies = self.decode_latents_no_normalize(cur_latents)
+                    reward_input = self.decode_latents_no_normalize(cur_latents)
             else:
-                decoded_tweedies = cur_latents
+                reward_input = cur_latents
 
-            cur_reward_values = reward_model(decoded_tweedies.to(torch.float32), self)  # torch.float32
+            if reward_input_type == "latent":
+                cur_reward_values = reward_model(reward_input, self)
+            else:
+                cur_reward_values = reward_model(
+                    reward_input.to(torch.float32), self
+                )
 
             if return_grad:
                 cur_grad = torch.autograd.grad(cur_reward_values, cur_latents, torch.ones_like(cur_reward_values), allow_unused=True)[0]
@@ -545,7 +621,7 @@ class StochasticFluxPipeline():
             reward_list.append(cur_reward_values.detach().clone())
             grad_list.append(cur_grad.detach().clone()) if return_grad else None
 
-            del decoded_tweedies, cur_reward_values
+            del reward_input, cur_reward_values
 
         rewards = torch.cat(reward_list, dim=0)
         grads = torch.cat(grad_list, dim=0) if return_grad else None
