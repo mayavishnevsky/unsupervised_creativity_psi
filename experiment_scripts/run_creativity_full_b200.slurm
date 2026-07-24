@@ -23,4 +23,7 @@ export RESULTS_PREFIX_OVERRIDE=results_creativity_iem_full_b200
 export RUN_TAG_OVERRIDE=full_b200_fixed_noise
 export RSYNC_RSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-exec bash /home/dcor/vishnevsky/unsupervised_creativity_psi/experiment_scripts/run_creativity_full_h200.slurm
+SHARED_LAUNCHER=/home/dcor/vishnevsky/unsupervised_creativity_psi/experiment_scripts/run_creativity_full_h200.slurm
+RUNTIME_LAUNCHER=/tmp/run_creativity_full_b200_${SLURM_JOB_ID:-manual}.slurm
+cp "$SHARED_LAUNCHER" "$RUNTIME_LAUNCHER"
+exec bash "$RUNTIME_LAUNCHER"
