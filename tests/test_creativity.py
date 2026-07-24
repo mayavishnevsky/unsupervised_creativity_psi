@@ -8,6 +8,7 @@ import torch
 from src.creativity import (
     BalancedPromptSampler,
     IEMReward,
+    expected_psi_reward_rounds,
     iem_features,
     iem_reward_from_reference_statistics,
     iem_schedule_terms,
@@ -15,6 +16,7 @@ from src.creativity import (
     reference_statistics,
     repeat_endpoint_conditions,
     sample_iem_noise_table,
+    staged_noise_table_index,
     update_reference_sums,
 )
 from src.flux_pipeline import StochasticFluxPipeline
@@ -130,6 +132,22 @@ class FormulaTests(unittest.TestCase):
 
         torch.testing.assert_close(first, second)
         self.assertEqual(first.shape, (3, 1, 2, 3))
+
+    def test_staged_noise_tables_cover_eight_windows_over_default_rounds(self):
+        total = expected_psi_reward_rounds(25, 25, 25)
+        assignments = [
+            staged_noise_table_index(index, total, 8) for index in range(total)
+        ]
+
+        self.assertEqual(total, 78)
+        self.assertEqual(sorted(set(assignments)), list(range(8)))
+        self.assertTrue(
+            all(left <= right for left, right in zip(assignments, assignments[1:]))
+        )
+        self.assertEqual(
+            [assignments.count(index) for index in range(8)],
+            [10, 10, 10, 9, 10, 10, 10, 9],
+        )
 
     def test_conditions_repeat_in_level_major_order(self):
         prompt = torch.tensor([[[1.0]], [[2.0]]])
@@ -262,10 +280,12 @@ class RewardIntegrationTests(unittest.TestCase):
                     for parameter in pipe.pipe.transformer.parameters()
                 )
             )
-            self.assertFalse(reward.mu_omega.requires_grad)
-            self.assertFalse(reward.v_omega.requires_grad)
+            self.assertFalse(reward.mu_omegas.requires_grad)
+            self.assertFalse(reward.v_omegas.requires_grad)
 
             candidate = torch.randn(1, 2, 2, requires_grad=True)
+            reward.register_data("candidate")
+            reward.begin_reward_evaluation()
             score = reward(candidate, pipe)
             score.sum().backward()
 
@@ -274,6 +294,48 @@ class RewardIntegrationTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(candidate.grad).all())
             with self.assertRaisesRegex(RuntimeError, "already been prepared"):
                 reward.prepare_references(pipe, excluded_prompts=[])
+
+    def test_staged_mode_prepares_matched_statistics_for_each_noise_table(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prompts = Path(directory) / "prompts.txt"
+            prompts.write_text("a\nb\n")
+            reward = IEMReward(
+                torch.float32,
+                torch.device("cpu"),
+                directory,
+                {
+                    "reference_prompt_files": [str(prompts)],
+                    "reference_sample_count": 2,
+                    "reference_batch_size": 2,
+                    "reference_num_inference_steps": 1,
+                    "num_steps": 2,
+                    "height": 32,
+                    "width": 32,
+                    "noise_table_mode": "staged",
+                    "noise_table_count": 3,
+                    "num_mcmc_steps": 1,
+                    "burn_in": 0,
+                    "num_inference_steps": 1,
+                },
+            )
+            pipe = _FakeWrapper()
+
+            reward.prepare_references(pipe, excluded_prompts=[])
+
+            self.assertEqual(reward.noise_tables.shape[0], 3)
+            self.assertEqual(reward.mu_omegas.shape[0], 3)
+            self.assertEqual(reward.v_omegas.shape, (3,))
+            self.assertEqual(len(pipe.reference_predict_grad_modes), 3)
+            self.assertFalse(torch.equal(reward.noise_tables[0], reward.noise_tables[1]))
+
+            reward.register_data("candidate")
+            active_tables = []
+            for _ in range(reward.total_reward_rounds):
+                reward.begin_reward_evaluation()
+                active_tables.append(reward.active_noise_table_index)
+            self.assertEqual(active_tables, [0, 0, 1, 1, 2])
+            with self.assertRaisesRegex(RuntimeError, "more reward rounds"):
+                reward.begin_reward_evaluation()
 
     def _make_reward_gradient_pipeline(self):
         pipeline = StochasticFluxPipeline.__new__(StochasticFluxPipeline)
@@ -353,6 +415,39 @@ class RewardIntegrationTests(unittest.TestCase):
         torch.testing.assert_close(decoded, torch.full((1, 2, 2), 12.0))
         torch.testing.assert_close(gradients, torch.full((1, 2, 2), 8.0))
         self.assertEqual(pipeline.decode_grad_modes, [False])
+
+    def test_reward_round_hook_runs_once_before_minibatch_splitting(self):
+        pipeline = self._make_reward_gradient_pipeline()
+
+        class RoundAwareReward:
+            cfg = SimpleNamespace(
+                reward_input_type="latent",
+                decode_to_unnormalized=False,
+                grad_norm=None,
+                grad_const_scale=None,
+            )
+
+            def __init__(self):
+                self.round_count = 0
+                self.tables_seen = []
+
+            def begin_reward_evaluation(self):
+                self.round_count += 1
+
+            def __call__(self, latents, pipe):
+                del pipe
+                self.tables_seen.append(self.round_count)
+                return latents.flatten(1).square().sum(dim=1)
+
+        reward = RoundAwareReward()
+        pipeline.get_reward_grad_vel_tweedies(
+            torch.ones(2, 2, 2),
+            reward,
+            torch.ones(2, dtype=torch.float32),
+        )
+
+        self.assertEqual(reward.round_count, 1)
+        self.assertEqual(reward.tables_seen, [1, 1])
 
 
 class ConditionedPredictionTests(unittest.TestCase):

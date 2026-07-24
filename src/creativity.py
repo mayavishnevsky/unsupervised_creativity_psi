@@ -168,6 +168,49 @@ def sample_iem_noise_table(
     )
 
 
+def expected_psi_reward_rounds(
+    num_mcmc_steps: int,
+    burn_in: int,
+    num_inference_steps: int,
+) -> int:
+    """Return the pCNL plus SMC reward rounds used for one Psi candidate."""
+
+    num_mcmc_steps = int(num_mcmc_steps)
+    burn_in = int(burn_in)
+    num_inference_steps = int(num_inference_steps)
+    if num_mcmc_steps < 1:
+        raise ValueError("num_mcmc_steps must be positive")
+    if burn_in < 0:
+        raise ValueError("burn_in must be non-negative")
+    if num_inference_steps < 1:
+        raise ValueError("num_inference_steps must be positive")
+
+    # pCNL: initial + loop + final. SMC: initial + one per inference step.
+    return num_mcmc_steps + burn_in + num_inference_steps + 3
+
+
+def staged_noise_table_index(
+    reward_round_index: int,
+    total_reward_rounds: int,
+    noise_table_count: int,
+) -> int:
+    """Divide ordered reward rounds as evenly as possible across noise tables."""
+
+    reward_round_index = int(reward_round_index)
+    total_reward_rounds = int(total_reward_rounds)
+    noise_table_count = int(noise_table_count)
+    if total_reward_rounds < 1:
+        raise ValueError("total_reward_rounds must be positive")
+    if not 1 <= noise_table_count <= total_reward_rounds:
+        raise ValueError(
+            "noise_table_count must be between one and total_reward_rounds"
+        )
+    if not 0 <= reward_round_index < total_reward_rounds:
+        raise ValueError("reward_round_index is outside the configured run")
+
+    return reward_round_index * noise_table_count // total_reward_rounds
+
+
 def repeat_endpoint_conditions(
     prompt_embeds: Tensor,
     pooled_prompt_embeds: Tensor,
@@ -367,7 +410,7 @@ def iem_reward_from_reference_statistics(
 
 @register_reward_model(name="creativity")
 class IEMReward(nn.Module):
-    """Equation-21 reward using one fixed, frozen-reference feature cloud."""
+    """Equation-21 reward using fixed endpoints and table-matched statistics."""
 
     @ignore_kwargs
     @dataclass
@@ -382,13 +425,18 @@ class IEMReward(nn.Module):
         sigma_min: float = 1.0
         sigma_max: float = 1000.0
         num_steps: int = 64
-        level_batch_size: int = 1
+        level_batch_size: int = 4
+        noise_table_mode: str = "fixed"
+        noise_table_count: int = 1
         reference_prompt_files: tuple[str, ...] = ()
         reference_sample_count: int = 48
         reference_batch_size: int = 1
         reference_num_inference_steps: int = 4
         reference_seed: int = 30_000_000
         noise_seed: int = 90_000_000
+        num_mcmc_steps: int = 25
+        burn_in: int = 25
+        num_inference_steps: int = 25
         log_timing: bool = False
 
     def __init__(self, dtype, device, save_dir, CFG):
@@ -410,16 +458,24 @@ class IEMReward(nn.Module):
             ),
             persistent=False,
         )
-        self.register_buffer("noise_table", None, persistent=False)
-        self.register_buffer("mu_omega", None, persistent=False)
-        self.register_buffer("v_omega", None, persistent=False)
+        self.register_buffer("noise_tables", None, persistent=False)
+        self.register_buffer("mu_omegas", None, persistent=False)
+        self.register_buffer("v_omegas", None, persistent=False)
         self.reference_count = 0
         self.prepared = False
-        self._candidate_evaluation_count = 0
+        self.total_reward_rounds = expected_psi_reward_rounds(
+            self.cfg.num_mcmc_steps,
+            self.cfg.burn_in,
+            self.cfg.num_inference_steps,
+        )
+        self.reward_round_count = 0
+        self.reward_minibatch_in_round = 0
+        self.active_noise_table_index: int | None = None
 
     def _validate_config(self) -> None:
         for name in (
             "level_batch_size",
+            "noise_table_count",
             "reference_sample_count",
             "reference_batch_size",
             "reference_num_inference_steps",
@@ -430,6 +486,23 @@ class IEMReward(nn.Module):
                 raise ValueError(f"{name} must be positive")
         if self.cfg.reward_input_type != "latent":
             raise ValueError("the creativity reward requires reward_input_type=latent")
+        if self.cfg.noise_table_mode not in ("fixed", "staged"):
+            raise ValueError("noise_table_mode must be 'fixed' or 'staged'")
+        if self.cfg.noise_table_mode == "fixed" and self.cfg.noise_table_count != 1:
+            raise ValueError("fixed noise-table mode requires noise_table_count=1")
+        total_reward_rounds = expected_psi_reward_rounds(
+            self.cfg.num_mcmc_steps,
+            self.cfg.burn_in,
+            self.cfg.num_inference_steps,
+        )
+        if (
+            self.cfg.noise_table_mode == "staged"
+            and not 2 <= self.cfg.noise_table_count <= total_reward_rounds
+        ):
+            raise ValueError(
+                "staged noise_table_count must be between 2 and the total "
+                f"reward rounds ({total_reward_rounds})"
+            )
 
     def _timing_start(self):
         if not self.cfg.log_timing:
@@ -442,9 +515,37 @@ class IEMReward(nn.Module):
         return synchronized_time(self.device) - start
 
     def register_data(self, data) -> None:
-        """Keep the reward-model interface used by the existing main loop."""
+        """Reset the noise-table schedule for the next candidate prompt."""
 
         del data
+        self.reward_round_count = 0
+        self.reward_minibatch_in_round = 0
+        self.active_noise_table_index = None
+
+    def begin_reward_evaluation(self) -> None:
+        """Select one table for a complete reward round before minibatching."""
+
+        if (
+            self.cfg.noise_table_mode == "staged"
+            and self.reward_round_count >= self.total_reward_rounds
+        ):
+            raise RuntimeError(
+                "Psi requested more reward rounds than configured; update "
+                "num_mcmc_steps, burn_in, or num_inference_steps"
+            )
+
+        if self.cfg.noise_table_mode == "fixed":
+            table_index = 0
+        else:
+            table_index = staged_noise_table_index(
+                self.reward_round_count,
+                self.total_reward_rounds,
+                self.cfg.noise_table_count,
+            )
+
+        self.active_noise_table_index = table_index
+        self.reward_round_count += 1
+        self.reward_minibatch_in_round = 0
 
     def _latent_image_ids(self, pipe, batch_size: int, dtype: torch.dtype) -> Tensor:
         latent_height = int(self.cfg.height) // (pipe.pipe.vae_scale_factor * 2)
@@ -481,7 +582,10 @@ class IEMReward(nn.Module):
         reference_generation_seconds = 0.0
         reference_feature_seconds = 0.0
         reference_statistics_seconds = 0.0
-        count, sum_phi, sum_phi_squared_norm = 0, None, None
+        table_count = int(self.cfg.noise_table_count)
+        counts = [0] * table_count
+        sum_phis = [None] * table_count
+        sum_phi_squared_norms = [None] * table_count
         batch_size = int(self.cfg.reference_batch_size)
 
         for start in range(0, len(records), batch_size):
@@ -518,15 +622,25 @@ class IEMReward(nn.Module):
             ).images
             reference_generation_seconds += self._timing_elapsed(stage_start)
 
-            if self.noise_table is None:
-                self.noise_table = sample_iem_noise_table(
-                    self.sigma_schedule,
-                    endpoints.shape[1:],
-                    device=self.device,
-                    dtype=torch.float32,
-                    seed=int(self.cfg.noise_seed) + int(self.cfg.seed),
+            if self.noise_tables is None:
+                self.noise_tables = torch.stack(
+                    [
+                        sample_iem_noise_table(
+                            self.sigma_schedule,
+                            endpoints.shape[1:],
+                            device=self.device,
+                            dtype=torch.float32,
+                            seed=(
+                                int(self.cfg.noise_seed)
+                                + int(self.cfg.seed)
+                                + table_index
+                            ),
+                        )
+                        for table_index in range(table_count)
+                    ],
+                    dim=0,
                 )
-            elif tuple(endpoints.shape[1:]) != tuple(self.noise_table.shape[2:]):
+            elif tuple(endpoints.shape[1:]) != tuple(self.noise_tables.shape[3:]):
                 raise ValueError("reference endpoint shape changed during preparation")
 
             latent_image_ids = self._latent_image_ids(
@@ -546,36 +660,51 @@ class IEMReward(nn.Module):
                     latent_image_ids=latent_image_ids,
                 )
 
-            stage_start = self._timing_start()
-            features = iem_features(
-                endpoints,
-                predict_reference,
-                self.sigma_schedule,
-                self.noise_table,
-                level_batch_size=int(self.cfg.level_batch_size),
-            )
-            reference_feature_seconds += self._timing_elapsed(stage_start)
+            for table_index in range(table_count):
+                stage_start = self._timing_start()
+                features = iem_features(
+                    endpoints,
+                    predict_reference,
+                    self.sigma_schedule,
+                    self.noise_tables[table_index],
+                    level_batch_size=int(self.cfg.level_batch_size),
+                )
+                reference_feature_seconds += self._timing_elapsed(stage_start)
 
-            stage_start = self._timing_start()
-            count, sum_phi, sum_phi_squared_norm = update_reference_sums(
-                count,
-                sum_phi,
-                sum_phi_squared_norm,
-                features,
-            )
-            reference_statistics_seconds += self._timing_elapsed(stage_start)
+                stage_start = self._timing_start()
+                (
+                    counts[table_index],
+                    sum_phis[table_index],
+                    sum_phi_squared_norms[table_index],
+                ) = update_reference_sums(
+                    counts[table_index],
+                    sum_phis[table_index],
+                    sum_phi_squared_norms[table_index],
+                    features,
+                )
+                reference_statistics_seconds += self._timing_elapsed(stage_start)
 
         stage_start = self._timing_start()
-        self.mu_omega, self.v_omega = reference_statistics(
-            count, sum_phi, sum_phi_squared_norm
-        )
+        statistics = [
+            reference_statistics(count, sum_phi, sum_phi_squared_norm)
+            for count, sum_phi, sum_phi_squared_norm in zip(
+                counts,
+                sum_phis,
+                sum_phi_squared_norms,
+                strict=True,
+            )
+        ]
+        self.mu_omegas = torch.stack([mu_omega for mu_omega, _ in statistics])
+        self.v_omegas = torch.stack([v_omega for _, v_omega in statistics])
         reference_statistics_seconds += self._timing_elapsed(stage_start)
-        self.reference_count = count
+        if len(set(counts)) != 1:
+            raise RuntimeError("noise tables produced inconsistent reference counts")
+        self.reference_count = counts[0]
         self.prepared = True
         elapsed = synchronized_time(self.device) - total_start
         print(
-            f"Prepared {count} fixed IEM references in {elapsed:.1f}s "
-            f"using {self.cfg.num_steps} probe levels",
+            f"Prepared {self.reference_count} fixed IEM references in {elapsed:.1f}s "
+            f"using {self.cfg.num_steps} probe levels and {table_count} noise tables",
             flush=True,
         )
         if self.cfg.log_timing:
@@ -586,6 +715,7 @@ class IEMReward(nn.Module):
                 f"endpoint_generation_seconds={reference_generation_seconds:.3f} "
                 f"iem_features_seconds={reference_feature_seconds:.3f} "
                 f"statistics_seconds={reference_statistics_seconds:.3f} "
+                f"noise_table_count={table_count} "
                 f"total_seconds={elapsed:.3f}",
                 flush=True,
             )
@@ -595,31 +725,42 @@ class IEMReward(nn.Module):
 
         if not self.prepared:
             raise RuntimeError("prepare_references must run before IEM scoring")
-        if tuple(x_0.shape[1:]) != tuple(self.noise_table.shape[2:]):
-            raise ValueError(
-                "candidate latent shape does not match the fixed IEM noise table"
+        if self.active_noise_table_index is None:
+            raise RuntimeError(
+                "begin_reward_evaluation must run before IEM scoring"
             )
 
+        table_index = self.active_noise_table_index
+        noise_table = self.noise_tables[table_index]
+        mu_omega = self.mu_omegas[table_index]
+        v_omega = self.v_omegas[table_index]
+        if tuple(x_0.shape[1:]) != tuple(noise_table.shape[2:]):
+            raise ValueError(
+                "candidate latent shape does not match the active IEM noise table"
+            )
+
+        self.reward_minibatch_in_round += 1
         feature_start = self._timing_start()
         features = iem_features(
             x_0,
             pipe.predict,
             self.sigma_schedule,
-            self.noise_table,
+            noise_table,
             level_batch_size=int(self.cfg.level_batch_size),
         )
         feature_seconds = self._timing_elapsed(feature_start)
 
         score_start = self._timing_start()
         score = iem_reward_from_reference_statistics(
-            features, self.mu_omega, self.v_omega
+            features, mu_omega, v_omega
         ).float()
         score_seconds = self._timing_elapsed(score_start)
         if self.cfg.log_timing:
-            self._candidate_evaluation_count += 1
             print(
                 "[timing] phase=iem_candidate "
-                f"evaluation={self._candidate_evaluation_count} "
+                f"reward_round={self.reward_round_count} "
+                f"minibatch_in_round={self.reward_minibatch_in_round} "
+                f"noise_table={table_index} "
                 f"batch_size={x_0.shape[0]} "
                 f"features_seconds={feature_seconds:.3f} "
                 f"equation21_seconds={score_seconds:.3f}",

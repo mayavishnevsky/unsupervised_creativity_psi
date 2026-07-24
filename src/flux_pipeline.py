@@ -545,6 +545,11 @@ class StochasticFluxPipeline():
         grad_list = list()
         vel_pred_list = list()
         tweedie_list = list()
+        begin_reward_evaluation = getattr(
+            reward_model, "begin_reward_evaluation", None
+        )
+        if begin_reward_evaluation is not None:
+            begin_reward_evaluation()
         reward_input_type = getattr(reward_model.cfg, "reward_input_type", "image")
         if reward_input_type not in ("image", "latent"):
             raise ValueError(f"unknown reward_input_type: {reward_input_type}")
@@ -627,6 +632,11 @@ class StochasticFluxPipeline():
     def get_reward_grad(self, latents, reward_model, is_pixel_space=False, return_grad=True):
         reward_list = list()
         grad_list = list()
+        begin_reward_evaluation = getattr(
+            reward_model, "begin_reward_evaluation", None
+        )
+        if begin_reward_evaluation is not None:
+            begin_reward_evaluation()
         reward_input_type = getattr(reward_model.cfg, "reward_input_type", "image")
         if reward_input_type not in ("image", "latent"):
             raise ValueError(f"unknown reward_input_type: {reward_input_type}")

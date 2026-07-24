@@ -129,8 +129,21 @@ The default `config/creativity.yaml`:
   files in the sibling `unsupervised_creativity_ram` checkout;
 - excludes every prompt in the current candidate dataset from that draw;
 - generates one vanilla FLUX.1-schnell endpoint per reference with four steps;
-- uses one deterministic noise table for every reference and candidate; and
+- uses one deterministic noise table for every reference and candidate by
+  default; and
 - evaluates 64 log-uniform sigma intervals from 1000 down to 1.
+
+An optional staged mode distributes the optimization's reward rounds across a
+small number of deterministic tables. For the default 78 rounds and eight
+tables:
+
+```text
+noise_table_mode=staged noise_table_count=8
+```
+
+Each complete reward round uses one table, including all chains or particles
+split into gradient minibatches. Reference statistics are computed once for
+each table. The existing `fixed` mode remains the default.
 
 Prompt files, reference count, seeds, sigma bounds, integration levels, and
 batch sizes can be changed in YAML or with OmegaConf command-line overrides:
@@ -141,7 +154,8 @@ CUDA_VISIBLE_DEVICES={$DEVICE} python main.py \
   --config ./config/creativity.yaml \
   --data_path ./data/aesthetic.txt \
   --save_dir ./results_creativity \
-  reference_sample_count=48 num_steps=64
+  reference_sample_count=48 num_steps=64 \
+  noise_table_mode=staged noise_table_count=8
 ```
 
 IEM is substantially more expensive than image-space rewards because every
